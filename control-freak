@@ -1,0 +1,103 @@
+#! /usr/bin/env python3
+
+# control-freak - Use your joystick to control other programs
+# Copyright (C) 2021  Joel Ray Holveck
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+import functools
+import select
+import struct
+import sys
+
+import Xlib.X
+import Xlib.display
+# This isn't used, but it needs to be loaded to prime the extension.
+import Xlib.ext.xtest
+import Xlib.keysymdef.latin1
+import Xlib.keysymdef.miscellany
+
+class Program:
+    @functools.lru_cache
+    def keysym2code(self, keysym):
+        rv = self.display.keysym_to_keycode(keysym)
+        if not rv:              # I think it returns 0, but maybe None
+            raise Exception("No keycode for keysym %i" % (keysym,))
+        return rv
+        
+    def send_chord(self, keysyms):
+        keycodes = list(map(self.keysym2code, keysyms))
+        # We set the times with 10ms between the modifiers, the final
+        # key, and the release.  (The default for the last argument is
+        # X.CurrentTime.)
+        for k in keycodes[:-1]:
+            self.display.xtest_fake_input(Xlib.X.KeyPress, k, 0)
+        self.display.xtest_fake_input(Xlib.X.KeyPress, keycodes[-1], 10)
+        for k in reversed(keycodes):
+            self.display.xtest_fake_input(Xlib.X.KeyRelease, k, 20)
+        # Send the event stream.
+        self.display.flush()
+
+    def handle_x(self):
+        # We don't need to process any X events, but we do need to
+        # read the X responses to prevent them from piling up.
+        for _ in range(self.display.pending_events()):
+            self.display.next_event()
+
+    def handle_js(self):
+        evbuf = self.jsdev.read(8)
+        if not evbuf:
+            print("Joystick disconnected")
+            sys.exit(0)
+
+        # *** THIS IS WHERE WE DISPATCH JOYSTICK STUFF TO X STUFF ***
+        # To read the joystick, see:
+        #     https://www.kernel.org/doc/Documentation/input/joystick-api.txt
+        #     linux/joystick.h
+        #     linux/input.h
+        #     https://gist.github.com/rdb/8864666.
+        # To see the names of X keysyms, see:
+        #     X11/keysymdef.h
+        # The Python keysymdef modules are based on the preceding #ifdef.
+        time, value, type, number = struct.unpack('IhBB', evbuf)
+        if type & 0x01 and number == 0 and value == 1:
+            # Type is button event, number is the A button, value is press
+            self.send_chord(
+                [Xlib.keysymdef.miscellany.XK_Shift_L,
+                 Xlib.keysymdef.latin1.XK_V])
+        else:
+            # Useful for debugging
+            print("No event for type / number / value ",
+                  repr((type, number, value)))
+    
+    def run(self):
+        self.display = Xlib.display.Display()
+        ext = self.display.query_extension('XTEST')
+        if ext is None:
+            raise Exception("Cannot get XTEST extension")
+
+        self.jsdev = open('/dev/input/js1', 'rb')
+        
+        while True:
+            (ready_to_read, _, _) = select.select(
+                [self.display, self.jsdev], [], [])
+
+            if self.display in ready_to_read:
+                self.handle_x()
+                
+            if self.jsdev in ready_to_read:
+                self.handle_js()
+                    
+if __name__ == "__main__":
+    Program().run()
